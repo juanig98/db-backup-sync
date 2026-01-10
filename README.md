@@ -1,34 +1,36 @@
 # 🔄 DB Backup Sync
 
-Sistema automatizado para sincronizar backups de bases de datos desde un servidor remoto mediante SSH/SFTP con elevación de privilegios (sudo).
+Sistema automatizado y modular para sincronizar backups de bases de datos desde múltiples servidores remotos mediante SSH/SFTP con elevación de privilegios (sudo).
 
 ## 📋 Descripción
 
-Este proyecto permite descargar automáticamente backups de bases de datos desde un servidor remoto (origen) a un servidor local (destino) cuando el backup está generado por root pero el acceso SSH es mediante un usuario sin privilegios.
+Este proyecto permite descargar automáticamente backups de bases de datos desde servidores remotos a un servidor local cuando el backup está generado por root pero el acceso SSH es mediante un usuario sin privilegios.
 
-**Características:**
-- ✅ Acceso mediante SSH con clave pública
-- ✅ Elevación de privilegios con sudo en servidor remoto
-- ✅ Verificación de existencia del archivo antes de descargar
-- ✅ Descarga atómica (archivo temporal → renombrado final)
-- ✅ Política de retención configurable
-- ✅ Logs detallados con timestamps
-- ✅ Validación de archivos vacíos
+**Características principales:**
+- ✅ **Multiservidor**: Soporta múltiples configuraciones para diferentes bases de datos y servidores
+- ✅ **Acceso seguro**: SSH con clave pública + sudo sin contraseña
+- ✅ **Validación robusta**: Verifica existencia, integridad (gzip) y tamaño de archivos
+- ✅ **Descarga atómica**: Usa archivo temporal con renombrado final para evitar corrupción
+- ✅ **Política de retención**: Limpieza automática de backups antiguos configurable
+- ✅ **Logs detallados**: Registro separado por configuración con timestamps ISO 8601
+- ✅ **Reutilizable**: Un solo script con múltiples archivos de configuración
 
 ---
 
 ## 🏗️ Arquitectura
 
 ```
-┌─────────────────────────┐         SSH + sudo cat          ┌──────────────────────────┐
-│  Servidor A (Origen)    │ ◄─────────────────────────────  │  Servidor B (Destino)   │
-│                         │                                  │                          │
-│  /var/backups/db/       │                                  │  /var/backups/remote-db/ │
-│  └─ 202601100300prod...  │                                  │  └─ backups descargados  │
-│                         │                                  │                          │
-│  Usuario: appuser       │                                  │  Usuario:  root (cron)    │
-│  Backup owner: root     │                                  │                          │
-└─────────────────────────┘                                  └──────────────────────────┘
+┌──────────────────────┐                              ┌──────────────────────────┐
+│  Servidor A (Prod)   │                              │                          │
+│  /var/backups/db/    │──┐                           │  Servidor B (Destino)   │
+│  Usuario:  appuser    │  │                           │  /var/backups/remote-db/ │
+│  Backup owner:  root  │  │                           │  ├── produccion/         │
+└──────────────────────┘  │   SSH + sudo cat          │  ├── staging/            │
+                          ├────────────────────────►  │  └── analytics/          │
+┌──────────────────────┐  │                           │                          │
+│  Servidor C (Stage)  │  │                           │  Usuario: root (cron)    │
+│  /backups/mysql/     │──┘                           │  Script: sync-db-backup  │
+└──────────────────────┘                              └──────────────────────────┘
 ```
 
 ---
@@ -41,17 +43,18 @@ Este proyecto permite descargar automáticamente backups de bases de datos desde
 
 ```bash
 sudo mkdir -p /opt/db-backup-sync/bin
-sudo mkdir -p /var/backups/remote-db
+sudo mkdir -p /opt/db-backup-sync/etc
+sudo mkdir -p /var/backups/remote-db/{produccion,staging,analytics}
 sudo mkdir -p /var/log
 ```
 
-#### b) Copiar el script principal
+#### b) Descargar e instalar el script principal
 
 ```bash
 sudo nano /opt/db-backup-sync/bin/sync-db-backup.sh
 ```
 
-Pegar el contenido del script y guardar.
+Copiar el contenido del script y guardar. 
 
 **Establecer permisos:**
 
@@ -66,79 +69,128 @@ sudo chown root:root /opt/db-backup-sync/bin/sync-db-backup.sh
 sudo ln -sf /opt/db-backup-sync/bin/sync-db-backup.sh /usr/local/bin/sync-db-backup
 ```
 
-#### d) Crear archivo de configuración
+#### d) Crear archivos de configuración
+
+**Ejemplo 1: Producción - Servidor A**
 
 ```bash
-sudo nano /etc/db-backup-sync.conf
+sudo nano /opt/db-backup-sync/etc/db-prod-serverA.conf
 ```
 
-**Contenido mínimo:**
-
 ```bash
-# === Servidor remoto (origen) ===
+# ============================================================
+# Configuración:  Base de datos PRODUCCIÓN (Servidor A)
+# ============================================================
+
+# === Identificación ===
+CONFIG_NAME="Producción - Servidor A"
+
+# === Servidor remoto ===
 REMOTE_USER="appuser"
 REMOTE_HOST="192.168.1.100"
+SSH_PORT="22"
 SSH_KEY="/root/.ssh/id_backup_sync"
 REMOTE_DIR="/var/backups/db"
 
 # === Configuración del backup ===
+# Formato del archivo: {YYYYMMDD}{HHmm}. {DB_NAME}.sql.gz
+# Ejemplo: 202601100300.produccion.sql.gz
 DB_NAME="produccion"
 BACKUP_TIME="0300"
 
 # === Almacenamiento local ===
-LOCAL_DIR="/var/backups/remote-db"
-LOG_DIR="/var/log/db-backup-sync"
+LOCAL_DIR="/var/backups/remote-db/produccion"
+LOG_FILE="/var/log/db-backup-sync-prod.log"
 
 # === Retención (días) ===
+RETENTION_DAYS="14"
+```
+
+**Ejemplo 2: Staging - Servidor B**
+
+```bash
+sudo nano /opt/db-backup-sync/etc/db-staging-serverB.conf
+```
+
+```bash
+# ============================================================
+# Configuración: Base de datos STAGING (Servidor B)
+# ============================================================
+
+CONFIG_NAME="Staging - Servidor B"
+
+REMOTE_USER="deploy"
+REMOTE_HOST="staging.example.com"
+SSH_PORT="2222"
+SSH_KEY="/root/.ssh/id_backup_staging"
+REMOTE_DIR="/backups/mysql"
+
+DB_NAME="staging_db"
+BACKUP_TIME="0200"
+
+LOCAL_DIR="/var/backups/remote-db/staging"
+LOG_FILE="/var/log/db-backup-sync-staging.log"
+
 RETENTION_DAYS="7"
 ```
 
-**Establecer permisos (archivo contiene rutas sensibles):**
+**Establecer permisos en archivos de configuración:**
 
 ```bash
-sudo chmod 600 /etc/db-backup-sync.conf
-sudo chown root:root /etc/db-backup-sync.conf
+sudo chmod 600 /opt/db-backup-sync/etc/*. conf
+sudo chown root:root /opt/db-backup-sync/etc/*. conf
 ```
 
-#### e) Generar par de claves SSH
+#### e) Generar claves SSH para cada servidor
+
+**Para Producción (Servidor A):**
 
 ```bash
-sudo ssh-keygen -t ed25519 -f /root/.ssh/id_backup_sync -C "backup-sync" -N ""
-```
-
-Copiar la clave pública al servidor remoto: 
-
-```bash
+sudo ssh-keygen -t ed25519 -f /root/. ssh/id_backup_sync -C "backup-sync-prod" -N ""
 sudo ssh-copy-id -i /root/.ssh/id_backup_sync. pub appuser@192.168.1.100
 ```
 
-**Probar conexión:**
+**Para Staging (Servidor B):**
+
+```bash
+sudo ssh-keygen -t ed25519 -f /root/.ssh/id_backup_staging -C "backup-sync-staging" -N ""
+sudo ssh-copy-id -i /root/.ssh/id_backup_staging.pub deploy@staging.example. com
+```
+
+**Probar conexiones:**
 
 ```bash
 sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 "echo 'Conexión OK'"
+sudo ssh -i /root/.ssh/id_backup_staging deploy@staging.example.com "echo 'Conexión OK'"
 ```
 
 ---
 
-### 2️⃣ En Servidor A (Origen/Remoto)
+### 2️⃣ En Servidores Remotos (Origen)
 
-#### a) Configurar permisos sudo para appuser
+Repetir estos pasos en **cada servidor remoto** (A, B, C, etc.).
 
-Editar configuración de sudoers:
+#### a) Configurar permisos sudo
+
+En **cada servidor remoto**, editar configuración de sudoers:
 
 ```bash
 sudo visudo
 ```
 
-**Agregar al final del archivo:**
+**Agregar al final (ajustar usuario y rutas según tu configuración):**
 
 ```sudoers
 # Permitir a appuser leer backups de DB sin contraseña
 appuser ALL=(root) NOPASSWD: /usr/bin/test -f /var/backups/db/*. sql.gz
 appuser ALL=(root) NOPASSWD: /usr/bin/cat /var/backups/db/*. sql.gz
+appuser ALL=(root) NOPASSWD: /usr/bin/du -h /var/backups/db/*.sql.gz
 ```
 
-> ⚠️ **Importante:** Ajustar la ruta `/var/backups/db/` según tu configuración real.
+> ⚠️ **Importante:** 
+> - Reemplazar `appuser` con el usuario SSH correspondiente
+> - Reemplazar `/var/backups/db/` con la ruta real de los backups
+> - Usar rutas absolutas a los comandos (`/usr/bin/cat`, etc.)
 
 **Validar sintaxis:**
 
@@ -146,55 +198,68 @@ appuser ALL=(root) NOPASSWD: /usr/bin/cat /var/backups/db/*. sql.gz
 sudo visudo -c
 ```
 
-#### b) Probar permisos desde Servidor B
+#### b) Verificar permisos desde Servidor B
 
-Desde el **Servidor B**, ejecutar: 
+Desde el **Servidor B**, probar los comandos con sudo:
 
 ```bash
 # Probar test
 sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
-  "sudo test -f /var/backups/db/test.sql.gz && echo 'OK' || echo 'FAIL'"
+  "sudo test -f /var/backups/db/test.sql.gz && echo 'OK' || echo 'No existe'"
 
-# Probar cat (si existe un backup)
+# Probar cat (con un backup real)
 sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
-  "sudo cat /var/backups/db/202601100300produccion.sql.gz" | head -c 100
+  "sudo cat /var/backups/db/202601100300.produccion.sql.gz" | head -c 100
+
+# Probar du
+sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
+  "sudo du -h /var/backups/db/202601100300.produccion.sql.gz"
 ```
 
 ---
 
-## ⚙️ Configuración del archivo `.conf`
+## ⚙️ Configuración
 
-| Variable | Descripción | Ejemplo |
-|----------|-------------|---------|
-| `REMOTE_USER` | Usuario SSH en servidor origen | `appuser` |
-| `REMOTE_HOST` | IP o hostname del servidor origen | `192.168.1.100` o `db-server.example.com` |
-| `SSH_KEY` | Ruta a la clave privada SSH | `/root/.ssh/id_backup_sync` |
-| `REMOTE_DIR` | Directorio donde están los backups en origen | `/var/backups/db` |
-| `DB_NAME` | Nombre de la base de datos (para construir el nombre del archivo) | `produccion` |
-| `BACKUP_TIME` | Hora de generación del backup (formato HHmm) | `0300` (3:00 AM) |
-| `LOCAL_DIR` | Directorio local donde guardar los backups | `/var/backups/remote-db` |
-| `LOG_DIR` | Ruta donde se guardarán los logs | `/var/log/db-backup-sync` |
-| `RETENTION_DAYS` | Días de retención (dejar vacío para no borrar) | `7`, `14`, `30` |
+### Variables del archivo `.conf`
+
+| Variable | Descripción | Ejemplo | Requerida |
+|----------|-------------|---------|-----------|
+| `CONFIG_NAME` | Identificación descriptiva | `"Producción - Servidor A"` | No |
+| `REMOTE_USER` | Usuario SSH en servidor origen | `appuser` | ✅ |
+| `REMOTE_HOST` | IP o hostname del servidor origen | `192.168.1.100` | ✅ |
+| `SSH_PORT` | Puerto SSH | `22` (por defecto) | No |
+| `SSH_KEY` | Ruta a la clave privada SSH | `/root/.ssh/id_backup_sync` | ✅ |
+| `REMOTE_DIR` | Directorio de backups en origen | `/var/backups/db` | ✅ |
+| `DB_NAME` | Nombre de la base de datos | `produccion` | ✅ |
+| `BACKUP_TIME` | Hora de generación (HHmm) | `0300` | ✅ |
+| `LOCAL_DIR` | Directorio local para backups | `/var/backups/remote-db/produccion` | ✅ |
+| `LOG_FILE` | Ruta del archivo de log | `/var/log/db-backup-sync-prod.log` | ✅ |
+| `RETENTION_DAYS` | Días de retención (vacío = no borrar) | `7`, `14`, `30` | No |
 
 ### Formato del nombre del archivo de backup
 
-El script construye el nombre del archivo como: 
+El script busca archivos con el siguiente formato:
 
 ```
 {YYYYMMDD}{HHmm}.{DB_NAME}.sql.gz
 ```
 
-**Ejemplo:**
-- Fecha: 10 de enero de 2026
-- Hora: 03:00 AM
-- Base:  `produccion`
-- **Resultado:** `202601100300.produccion.sql.gz`
+**Componentes:**
+- `YYYYMMDD`: Fecha (año, mes, día)
+- `HHmm`: Hora de generación (24h)
+- `DB_NAME`: Nombre de la base de datos
+- `.sql.gz`: Extensión fija
+
+**Ejemplos:**
+- `202601100300.produccion.sql.gz`
+- `202601152200.staging_db.sql.gz`
+- `202612310100.analytics.sql.gz`
 
 ---
 
 ## ⏰ Configuración de Cron
 
-### En Servidor B (Destino) - Ejecutar sincronización
+### En Servidor B (Destino) - Sincronización
 
 Editar crontab de root:
 
@@ -202,11 +267,21 @@ Editar crontab de root:
 sudo crontab -e
 ```
 
-**Agregar línea para ejecutar todos los días a las 22:05:**
+**Agregar las siguientes líneas:**
 
 ```cron
-# Sincronizar backup de DB desde servidor remoto
-5 22 * * * /usr/local/bin/sync-db-backup >> /var/log/db-backup-sync.log 2>&1
+# ============================================================
+# Sincronización de backups de múltiples bases de datos
+# ============================================================
+
+# Producción - Servidor A (ejecutar diariamente a las 22:05)
+5 22 * * * /usr/local/bin/sync-db-backup -env /opt/db-backup-sync/etc/db-prod-serverA.conf
+
+# Staging - Servidor B (ejecutar diariamente a las 22:10)
+10 22 * * * /usr/local/bin/sync-db-backup -env /opt/db-backup-sync/etc/db-staging-serverB.conf
+
+# Analytics - Servidor C (ejecutar diariamente a las 22:15)
+15 22 * * * /usr/local/bin/sync-db-backup -env /opt/db-backup-sync/etc/db-analytics-serverC.conf
 ```
 
 **Verificar crontab:**
@@ -215,32 +290,93 @@ sudo crontab -e
 sudo crontab -l
 ```
 
+### En Servidores Remotos (Origen) - Generación de backups
+
+**IMPORTANTE:** Este README asume que los backups **ya se generan** en los servidores remotos.  Si necesitas configurar la generación automática, aquí un ejemplo:
+
+```bash
+sudo crontab -e
+```
+
+**Ejemplo para mysqldump:**
+
+```cron
+# Generar backup de base de datos a las 22:05 todos los días
+5 22 * * * /usr/local/bin/backup-mysql. sh
+```
+
+**Script de ejemplo (`/usr/local/bin/backup-mysql.sh`):**
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+DB_NAME="produccion"
+BACKUP_DIR="/var/backups/db"
+TIMESTAMP=$(date +%Y%m%d%H%M)
+BACKUP_FILE="${TIMESTAMP}.${DB_NAME}.sql. gz"
+
+mkdir -p "$BACKUP_DIR"
+
+mysqldump -u root -p"${MYSQL_ROOT_PASSWORD}" \
+  --single-transaction \
+  --routines \
+  --triggers \
+  "$DB_NAME" | gzip > "${BACKUP_DIR}/${BACKUP_FILE}"
+
+chmod 600 "${BACKUP_DIR}/${BACKUP_FILE}"
+
+echo "[$(date -Iseconds)] Backup creado: ${BACKUP_FILE}"
+```
+
 ---
 
-## 🧪 Pruebas
+## 🧪 Pruebas y Uso
 
-### 1. Prueba manual
+### Ejecución manual
 
 ```bash
-sudo /usr/local/bin/sync-db-backup
+# Sincronizar producción
+sudo sync-db-backup -env /opt/db-backup-sync/etc/db-prod-serverA. conf
+
+# Sincronizar staging
+sudo sync-db-backup -env /opt/db-backup-sync/etc/db-staging-serverB.conf
+
+# Ver ayuda
+sync-db-backup -h
 ```
 
-### 2. Ver logs en tiempo real
+### Monitorear logs en tiempo real
 
 ```bash
-sudo tail -f /var/log/db-backup-sync.log
+# Log de producción
+sudo tail -f /var/log/db-backup-sync-prod.log
+
+# Log de staging
+sudo tail -f /var/log/db-backup-sync-staging.log
+
+# Todos los logs simultáneamente
+sudo tail -f /var/log/db-backup-sync-*.log
 ```
 
-### 3. Verificar backups descargados
+### Verificar backups descargados
 
 ```bash
-ls -lh /var/backups/remote-db/
+# Listar backups de producción
+ls -lh /var/backups/remote-db/produccion/
+
+# Listar todos los backups
+find /var/backups/remote-db/ -name "*.sql.gz" -type f -printf "%T+ %p\n" | sort -r
 ```
 
-### 4. Probar con archivo de configuración alternativo
+### Verificar integridad de un backup
 
 ```bash
-sudo sync-db-backup /etc/db-backup-sync-test.conf
+# Validar compresión gzip
+gzip -t /var/backups/remote-db/produccion/202601100300.produccion.sql.gz
+
+# Ver primeras líneas del SQL
+zcat /var/backups/remote-db/produccion/202601100300.produccion.sql. gz | head -20
 ```
 
 ---
@@ -250,122 +386,283 @@ sudo sync-db-backup /etc/db-backup-sync-test.conf
 ```
 /opt/db-backup-sync/
 ├── bin/
-│   └── sync-db-backup.sh          # Script principal
+│   └── sync-db-backup.sh              # Script principal
+└── etc/
+    ├── db-prod-serverA.conf           # Config:  Producción Servidor A
+    ├── db-staging-serverB.conf        # Config: Staging Servidor B
+    └── db-analytics-serverC.conf      # Config: Analytics Servidor C
 
-/etc/
-└── db-backup-sync.conf             # Configuración
+/var/backups/remote-db/
+├── produccion/
+│   ├── 202601100300.produccion. sql.gz
+│   ├── 202601110300.produccion.sql.gz
+│   └── . tmp/                          # Archivos temporales durante descarga
+├── staging/
+│   └── ... 
+└── analytics/
+    └── ... 
 
-/var/
-├── backups/
-│   └── remote-db/                  # Backups descargados
-│       ├── 202601090300.produccion.sql.gz
-│       ├── 202601100300.produccion.sql.gz
-│       ├── 202601110300.produccion.sql.gz
-│       └── . tmp/                   # Temporales durante descarga
-└── log/
-    └── db-backup-sync
-        └── 202601090305.log          # Logs del sistema
-        └── 202601100305.log          # Logs del sistema
-        └── 202601110305.log          # Logs del sistema
+/var/log/
+├── db-backup-sync-prod. log
+├── db-backup-sync-staging.log
+└── db-backup-sync-analytics. log
 
 /root/. ssh/
-└── id_backup_sync                  # Clave privada SSH
+├── id_backup_sync                     # Clave privada para Servidor A
+├── id_backup_sync.pub
+├── id_backup_staging                  # Clave privada para Servidor B
+└── id_backup_staging.pub
+
+/usr/local/bin/
+└── sync-db-backup -> /opt/db-backup-sync/bin/sync-db-backup.sh
 ```
 
 ---
 
 ## 🔍 Diagnóstico de problemas
 
-### ❌ Error:  "El archivo remoto no existe"
+### ❌ Error: "El archivo remoto no existe"
 
-**Causa:** El nombre del archivo no coincide con lo esperado. 
+**Causa:** El nombre del archivo no coincide con el formato esperado. 
 
 **Solución:**
-1. Listar archivos en el servidor remoto:
+
+1.  Listar archivos reales en el servidor remoto: 
    ```bash
    sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
      "sudo ls -lh /var/backups/db/"
    ```
-2. Verificar que el nombre coincida con el patrón:  `{FECHA}{HORA}{NOMBRE}. sql.gz`
-3. Ajustar variables `DB_NAME` y `BACKUP_TIME` en `/etc/db-backup-sync. conf`
+
+2. Verificar el formato esperado:  `{YYYYMMDD}{HHmm}.{DB_NAME}. sql.gz`
+   - Ejemplo correcto: `202601100300.produccion.sql.gz`
+   - Ejemplo incorrecto:  `20260110_0300_produccion.sql.gz`
+
+3. Ajustar variables en el `.conf`:
+   ```bash
+   DB_NAME="produccion"
+   BACKUP_TIME="0300"
+   ```
 
 ### ❌ Error: "sudo: no tty present and no askpass program specified"
 
-**Causa:** El usuario no tiene permisos sudo sin contraseña.
+**Causa:** El usuario no tiene permisos sudo configurados correctamente.
 
 **Solución:**
-- Verificar configuración en servidor A:
-  ```bash
-  sudo -l -U appuser
-  ```
-- Debe mostrar las líneas del `visudo` configuradas. 
+
+1. En el servidor remoto, verificar configuración sudo:
+   ```bash
+   sudo -l -U appuser
+   ```
+
+2. Debe mostrar: 
+   ```
+   User appuser may run the following commands: 
+       (root) NOPASSWD: /usr/bin/test -f /var/backups/db/*.sql. gz
+       (root) NOPASSWD: /usr/bin/cat /var/backups/db/*.sql.gz
+   ```
+
+3. Si no aparece, revisar y corregir `/etc/sudoers` con `sudo visudo`
 
 ### ❌ Error:  "Permission denied (publickey)"
 
-**Causa:** La clave SSH no está configurada correctamente.
+**Causa:** La clave SSH no está autorizada en el servidor remoto. 
 
 **Solución:**
-1. Verificar que la clave pública esté en el servidor remoto: 
-   ```bash
-   sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
-     "cat ~/. ssh/authorized_keys"
-   ```
-2. Re-copiar la clave: 
+
+1. Re-copiar la clave pública: 
    ```bash
    sudo ssh-copy-id -i /root/.ssh/id_backup_sync.pub appuser@192.168.1.100
    ```
 
-### ❌ El archivo descargado está vacío
+2. Verificar que quedó registrada: 
+   ```bash
+   sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
+     "cat ~/. ssh/authorized_keys"
+   ```
 
-**Causa:** El comando `sudo cat` falló silenciosamente.
+3. Verificar permisos en el servidor remoto:
+   ```bash
+   # Los permisos deben ser: 
+   # ~/. ssh/                    700
+   # ~/.ssh/authorized_keys     600
+   ```
+
+### ❌ Error:  "El archivo descargado está vacío"
+
+**Causa:** El comando `sudo cat` falló o el archivo original está corrupto.
 
 **Solución:**
-- Probar manualmente: 
-  ```bash
-  sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
-    "sudo cat /var/backups/db/archivo.sql.gz" | file -
-  ```
-- Verificar permisos del archivo en servidor remoto:
-  ```bash
-  sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
-    "sudo ls -lh /var/backups/db/archivo.sql.gz"
-  ```
+
+1. Probar descarga manual:
+   ```bash
+   sudo ssh -i /root/.ssh/id_backup_sync appuser@192.168.1.100 \
+     "sudo cat /var/backups/db/202601100300.produccion.sql.gz" > /tmp/test.sql. gz
+   ```
+
+2. Verificar tamaño del archivo descargado:
+   ```bash
+   ls -lh /tmp/test.sql.gz
+   ```
+
+3. Validar integridad: 
+   ```bash
+   gzip -t /tmp/test.sql.gz
+   ```
+
+### ❌ Error: "gzip: stdin: not in gzip format"
+
+**Causa:** El archivo no es un gzip válido.
+
+**Solución:**
+
+1. Verificar tipo de archivo:
+   ```bash
+   file /var/backups/remote-db/produccion/202601100300.produccion.sql. gz
+   ```
+
+2. Si no es gzip, verificar el proceso de generación del backup en el servidor remoto
+
+### ❌ Cron no ejecuta el script
+
+**Causa:** Variables de entorno o rutas incorrectas en cron.
+
+**Solución:**
+
+1. Verificar que el cron está activo:
+   ```bash
+   sudo systemctl status cron
+   ```
+
+2. Revisar logs del sistema:
+   ```bash
+   sudo grep CRON /var/log/syslog | tail -20
+   ```
+
+3. Probar el comando exacto del cron manualmente:
+   ```bash
+   sudo /usr/local/bin/sync-db-backup -env /opt/db-backup-sync/etc/db-prod-serverA.conf
+   ```
+
+4. Verificar que el symlink existe:
+   ```bash
+   ls -l /usr/local/bin/sync-db-backup
+   ```
 
 ---
 
 ## 🔐 Seguridad
 
-### Recomendaciones
+### Mejores prácticas implementadas
 
-1. **Clave SSH dedicada:** Usar una clave exclusiva para este proceso
-2. **Permisos restrictivos en sudoers:** Solo comandos específicos (`test`, `cat`)
-3. **Rutas absolutas en sudoers:** Evitar que se ejecuten comandos alternativos
-4. **Archivo . conf con permisos 600:** Solo root puede leerlo
-5. **Logs protegidos:** Verificar que no contengan información sensible
+✅ **Claves SSH dedicadas**:  Una clave por servidor/entorno  
+✅ **Permisos restrictivos**: Archivos `.conf` con chmod 600  
+✅ **Sudo granular**: Solo comandos específicos permitidos  
+✅ **Rutas absolutas**: En sudoers para evitar ataques PATH  
+✅ **BatchMode SSH**: No solicita contraseñas interactivas  
+✅ **Validación de integridad**: Verifica formato gzip  
+✅ **Descarga atómica**: Archivo temporal + renombrado  
 
 ### Auditoría
 
-Ver intentos de uso de sudo en servidor A:
+**Ver intentos de sudo en servidor remoto:**
 
 ```bash
 sudo grep appuser /var/log/auth.log | tail -20
 ```
 
----
-
-## 📈 Monitoreo y alertas (opcional)
-
-### Crear script de verificación
+**Ver conexiones SSH:**
 
 ```bash
-#!/bin/bash
-LATEST=$(ls -t /var/backups/remote-db/*. sql.gz 2>/dev/null | head -1)
-AGE=$(($(date +%s) - $(stat -c %Y "$LATEST" 2>/dev/null || echo 0)))
+sudo grep "Accepted publickey" /var/log/auth.log | grep appuser
+```
 
-if [ $AGE -gt 90000 ]; then  # 25 horas
-  echo "⚠️  ALERTA: Último backup tiene más de 25 horas"
-  # Enviar notificación (email, Telegram, etc.)
-fi
+**Verificar permisos de archivos sensibles:**
+
+```bash
+# En Servidor B
+sudo find /opt/db-backup-sync/etc -type f -ls
+sudo find /root/.ssh -type f -name "id_backup*" -ls
+```
+
+---
+
+## 📈 Monitoreo y Alertas
+
+### Script de verificación de estado
+
+Crear `/opt/db-backup-sync/bin/check-backups.sh`:
+
+```bash
+#!/usr/bin/env bash
+#
+# check-backups.sh - Verifica el estado de todos los backups
+#
+
+echo "🔍 Verificando estado de backups..."
+echo ""
+
+check_backup() {
+  local name="$1"
+  local dir="$2"
+  local max_age_hours="${3:-25}"
+  
+  echo "📦 $name"
+  echo "   Directorio: $dir"
+  
+  if [[ !  -d "$dir" ]]; then
+    echo "   ❌ Directorio no existe"
+    return 1
+  fi
+  
+  local latest=$(ls -t "$dir"/*. sql.gz 2>/dev/null | head -1)
+  
+  if [[ -z "$latest" ]]; then
+    echo "   ❌ No se encontraron backups"
+    return 1
+  fi
+  
+  local age=$(($(date +%s) - $(stat -c %Y "$latest")))
+  local age_hours=$((age / 3600))
+  local size=$(du -h "$latest" | awk '{print $1}')
+  
+  echo "   📄 Último:  $(basename "$latest")"
+  echo "   📏 Tamaño: $size"
+  echo "   ⏰ Antigüedad: ${age_hours}h"
+  
+  if [[ $age_hours -gt $max_age_hours ]]; then
+    echo "   ⚠️ ALERTA: Backup tiene más de ${max_age_hours}h"
+    return 1
+  else
+    echo "   ✅ OK"
+  fi
+  
+  echo ""
+}
+
+# Verificar cada configuración
+check_backup "Producción" "/var/backups/remote-db/produccion" 25
+check_backup "Staging" "/var/backups/remote-db/staging" 25
+check_backup "Analytics" "/var/backups/remote-db/analytics" 25
+
+echo "✅ Verificación completada"
+```
+
+**Hacer ejecutable:**
+
+```bash
+sudo chmod +x /opt/db-backup-sync/bin/check-backups.sh
+```
+
+**Ejecutar:**
+
+```bash
+sudo /opt/db-backup-sync/bin/check-backups. sh
+```
+
+**Agregar a cron (verificación diaria a las 9:00 AM):**
+
+```cron
+0 9 * * * /opt/db-backup-sync/bin/check-backups.sh | mail -s "Estado Backups DB" admin@example.com
 ```
 
 ---
@@ -377,40 +674,139 @@ fi
 Crear `/etc/logrotate.d/db-backup-sync`:
 
 ```
-/var/log/db-backup-sync.log {
-    weekly
-    rotate 4
+/var/log/db-backup-sync-*. log {
+    daily
+    rotate 30
     compress
     delaycompress
     missingok
     notifempty
+    create 640 root root
 }
+```
+
+**Aplicar inmediatamente:**
+
+```bash
+sudo logrotate -f /etc/logrotate. d/db-backup-sync
 ```
 
 ### Actualizar el script
 
 ```bash
+# Editar script
 sudo nano /opt/db-backup-sync/bin/sync-db-backup.sh
-# Hacer cambios
-sudo chmod 750 /opt/db-backup-sync/bin/sync-db-backup.sh
+
+# Verificar sintaxis
+bash -n /opt/db-backup-sync/bin/sync-db-backup.sh
+
+# Probar manualmente
+sudo sync-db-backup -env /opt/db-backup-sync/etc/db-prod-serverA. conf
+```
+
+### Agregar nueva configuración
+
+```bash
+# 1. Copiar template
+sudo cp /opt/db-backup-sync/etc/db-prod-serverA.conf \
+        /opt/db-backup-sync/etc/db-new-serverD.conf
+
+# 2. Editar valores
+sudo nano /opt/db-backup-sync/etc/db-new-serverD.conf
+
+# 3. Crear directorio local
+sudo mkdir -p /var/backups/remote-db/new_db
+
+# 4. Generar clave SSH
+sudo ssh-keygen -t ed25519 -f /root/. ssh/id_backup_new -C "backup-sync-new" -N ""
+sudo ssh-copy-id -i /root/.ssh/id_backup_new. pub user@servidor-d
+
+# 5. Configurar sudo en servidor remoto
+# (ver sección "Configurar permisos sudo")
+
+# 6. Probar
+sudo sync-db-backup -env /opt/db-backup-sync/etc/db-new-serverD. conf
+
+# 7. Agregar a cron
+sudo crontab -e
+# 20 22 * * * /usr/local/bin/sync-db-backup -env /opt/db-backup-sync/etc/db-new-serverD.conf
+```
+
+---
+
+## 🚀 Instalación rápida (script automatizado)
+
+Crear `/tmp/install-db-backup-sync.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "🔧 Instalando DB Backup Sync..."
+
+# Crear estructura
+mkdir -p /opt/db-backup-sync/{bin,etc}
+mkdir -p /var/backups/remote-db
+mkdir -p /var/log
+
+# Descargar script principal
+curl -sSL https://raw.githubusercontent.com/tu-repo/db-backup-sync/main/bin/sync-db-backup.sh \
+  -o /opt/db-backup-sync/bin/sync-db-backup.sh
+
+chmod 750 /opt/db-backup-sync/bin/sync-db-backup.sh
+chown root:root /opt/db-backup-sync/bin/sync-db-backup.sh
+
+# Crear symlink
+ln -sf /opt/db-backup-sync/bin/sync-db-backup.sh /usr/local/bin/sync-db-backup
+
+echo "✅ Instalación completada"
+echo ""
+echo "📌 Próximos pasos:"
+echo "1. Crear archivos de configuración en /opt/db-backup-sync/etc/"
+echo "2. Generar claves SSH"
+echo "3. Configurar sudo en servidores remotos"
+echo "4. Probar: sync-db-backup -env /opt/db-backup-sync/etc/tu-config.conf"
+echo "5. Configurar cron"
+```
+
+**Ejecutar:**
+
+```bash
+sudo bash /tmp/install-db-backup-sync.sh
 ```
 
 ---
 
 ## 📄 Licencia
 
-Este proyecto es de uso interno.  Ajustar según necesidades de tu organización.
+Este proyecto es de uso interno. Ajustar según necesidades de tu organización.
 
 ---
 
-## 👤 Autor
+## 👤 Contacto
 
-**Contacto:** juanigalarza98@gmail.com
+**Mantenedor:** Equipo de Infraestructura  
+**Email:** sysadmin@tuempresa.com  
+**Documentación:** https://wiki.tuempresa.com/db-backup-sync
 
 ---
 
 ## 🔗 Referencias
 
-- [OpenSSH Documentation](https://www.openssh.com/manual.html)
+- [OpenSSH Manual](https://www.openssh.com/manual.html)
 - [Sudo Manual](https://www.sudo.ws/docs/man/sudoers.man/)
 - [Cron HowTo](https://help.ubuntu.com/community/CronHowto)
+- [Bash Best Practices](https://bertvv.github.io/cheat-sheets/Bash. html)
+- [MySQL Backup Best Practices](https://dev.mysql.com/doc/refman/8.0/en/backup-methods.html)
+
+---
+
+## 📌 Changelog
+
+### v1.0.0 (2026-01-10)
+- ✅ Versión inicial
+- ✅ Soporte multi-servidor con parámetro `-env`
+- ✅ Validación de integridad gzip
+- ✅ Política de retención configurable
+- ✅ Logs separados por configuración
+- ✅ Descarga atómica con archivos temporales

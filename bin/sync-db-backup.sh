@@ -1,102 +1,252 @@
 #!/usr/bin/env bash
+#
+# sync-db-backup.sh
+# Sincroniza backup de base de datos desde servidor remoto
+#
+# Uso: sync-db-backup.sh -env /ruta/al/archivo. conf
+#
 set -euo pipefail
 
 # ============================================================
-# Script:  Descargar backup de DB desde servidor remoto (A) a local (B)
-# Uso: ./pull_db_backup_from_A.sh [/ruta/al/archivo. env]
+# Constantes
 # ============================================================
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="1.0.0"
 
-CONFIG_FILE="${1:-./pull.conf}"
+# ============================================================
+# Funciones auxiliares
+# ============================================================
+usage() {
+  cat <<EOF
+Uso: $SCRIPT_NAME -env <archivo_configuracion>
 
-# Verificar que existe el archivo de configuración
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+Sincroniza backups de base de datos desde un servidor remoto. 
+
+Opciones:
+  -env FILE     Archivo de configuración (requerido)
+  -h, --help    Muestra esta ayuda
+
+Ejemplo:
+  $SCRIPT_NAME -env /opt/db-backup-sync/etc/db-prod. conf
+
+EOF
+  exit 0
+}
+
+log() {
+  echo "[$(date -Iseconds)] $*" | tee -a "$LOG_FILE"
+}
+
+error() {
+  echo "[$(date -Iseconds)] ERROR: $*" | tee -a "$LOG_FILE" >&2
+}
+
+# ============================================================
+# Parseo de argumentos
+# ============================================================
+CONFIG_FILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -env)
+      CONFIG_FILE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo "ERROR: Opción desconocida: $1" >&2
+      echo "Usa -h para ver la ayuda" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Validar que se pasó el archivo de configuración
+if [[ -z "$CONFIG_FILE" ]]; then
+  echo "ERROR:  Debes especificar un archivo de configuración con -env" >&2
+  echo "Ejemplo: $SCRIPT_NAME -env /opt/db-backup-sync/etc/db-prod.conf" >&2
   exit 1
 fi
 
-# Cargar variables desde el archivo
+# ============================================================
+# Carga y validación de configuración
+# ============================================================
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "ERROR: Archivo de configuración no encontrado: $CONFIG_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -r "$CONFIG_FILE" ]]; then
+  echo "ERROR: No se puede leer el archivo de configuración: $CONFIG_FILE" >&2
+  exit 1
+fi
+
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
 
-# Validar variables obligatorias
+# Variables requeridas
 REQUIRED_VARS=(
   REMOTE_USER
   REMOTE_HOST
   SSH_KEY
+  SSH_PORT
   REMOTE_DIR
   DB_NAME
   BACKUP_TIME
   LOCAL_DIR
-  LOG_DIR
+  LOG_FILE
 )
 
 for var in "${REQUIRED_VARS[@]}"; do
   if [[ -z "${!var:-}" ]]; then
-    echo "ERROR: Variable $var no está definida en $CONFIG_FILE" >&2
+    echo "ERROR: Variable requerida '$var' no definida en $CONFIG_FILE" >&2
     exit 1
   fi
 done
 
-TODAY_DATE=$(date +%Y%m%d)
-NOW=$(date +%Y%m%d%H%M)
-
-# Crear directorios si no existen
-LOG_FILE="${LOG_DIR}/${NOW}.log"
-TMP_DIR="${LOCAL_DIR}/tmp"
-mkdir -p "$LOCAL_DIR" "$TMP_DIR"
-touch "$LOG_FILE"
-
-# ============================================================
-# Construir el nombre del archivo remoto con la fecha de hoy
-# ============================================================
-# Formato: YYYYMMddHHmm + DB_NAME + .sql.gz
-# Ejemplo: 202601100300mi_base_de_datos.sql.gz
-REMOTE_FILE="${TODAY_DATE}${BACKUP_TIME}.${DB_NAME}.sql.gz"
-REMOTE_FULL_PATH="${REMOTE_DIR}/${REMOTE_FILE}"
-
-echo "[$(date -Is)] ====== Iniciando descarga de backup ======" >> "$LOG_FILE"
-echo "[$(date -Is)] Archivo remoto: ${REMOTE_FULL_PATH}" >> "$LOG_FILE"
-
-# ============================================================
-# 1) Verificar que el archivo existe (con sudo en remoto)
-# ============================================================
-if ! ssh -p"$REMOTE_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-  "${REMOTE_USER}@${REMOTE_HOST}" \
-  "sudo test -f ${REMOTE_FULL_PATH}" 2>> "$LOG_FILE"; then
-  echo "[$(date -Is)] ERROR: El archivo remoto no existe: ${REMOTE_FULL_PATH}" >> "$LOG_FILE"
+# Validar que la clave SSH existe
+if [[ !  -f "$SSH_KEY" ]]; then
+  echo "ERROR:  Clave SSH no encontrada:  $SSH_KEY" >&2
   exit 1
 fi
 
 # ============================================================
-# 2) Descargar usando sudo cat en remoto y redirección local
+# Preparación
 # ============================================================
-LOCAL_TMP="${TMP_DIR}/${REMOTE_FILE}.partiasudl"
+TMP_DIR="${LOCAL_DIR}/.tmp"
+mkdir -p "$LOCAL_DIR" "$TMP_DIR"
+touch "$LOG_FILE"
+
+# Construir nombre del archivo
+TODAY_DATE=$(date +%Y%m%d)
+REMOTE_FILE="${TODAY_DATE}${BACKUP_TIME}.${DB_NAME}.sql.gz"
+REMOTE_FULL_PATH="${REMOTE_DIR}/${REMOTE_FILE}"
+
+# Puerto SSH (opcional, por defecto 22)
+SSH_PORT="${SSH_PORT:-22}"
+
+log "====== Inicio de sincronización ======"
+log "Versión: $SCRIPT_VERSION"
+log "Configuración: $CONFIG_FILE"
+log "Servidor remoto: ${REMOTE_USER}@${REMOTE_HOST}:${SSH_PORT}"
+log "Archivo remoto: ${REMOTE_FULL_PATH}"
+
+# ============================================================
+# 1) Verificar existencia del archivo remoto
+# ============================================================
+log "Verificando existencia del archivo..."
+
+if !  ssh -i "$SSH_KEY" \
+     -p "$SSH_PORT" \
+     -o BatchMode=yes \
+     -o StrictHostKeyChecking=accept-new \
+     -o ConnectTimeout=10 \
+     "${REMOTE_USER}@${REMOTE_HOST}" \
+     "sudo test -f '${REMOTE_FULL_PATH}'" 2>> "$LOG_FILE"; then
+  error "El archivo no existe en el servidor remoto:  ${REMOTE_FULL_PATH}"
+  exit 1
+fi
+
+log "✓ Archivo verificado en servidor remoto"
+
+# ============================================================
+# 2) Obtener información del archivo remoto
+# ============================================================
+REMOTE_SIZE=$(ssh -i "$SSH_KEY" \
+     -p "$SSH_PORT" \
+     -o BatchMode=yes \
+     -o StrictHostKeyChecking=accept-new \
+     "${REMOTE_USER}@${REMOTE_HOST}" \
+     "sudo du -h '${REMOTE_FULL_PATH}'" 2>> "$LOG_FILE" | awk '{print $1}')
+
+log "Tamaño remoto: ${REMOTE_SIZE}"
+
+# ============================================================
+# 3) Descargar archivo
+# ============================================================
+LOCAL_TMP="${TMP_DIR}/${REMOTE_FILE}. partial"
 LOCAL_FINAL="${LOCAL_DIR}/${REMOTE_FILE}"
 
-echo "[$(date -Is)] Descargando a:  ${LOCAL_FINAL}" >> "$LOG_FILE"
+# Verificar si ya existe localmente
+if [[ -f "$LOCAL_FINAL" ]]; then
+  log "⚠️  El archivo ya existe localmente:  $LOCAL_FINAL"
+  log "Saltando descarga..."
+  log "====== Sincronización completada (archivo ya existente) ======"
+  exit 0
+fi
 
-if ssh -p"$REMOTE_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-  "${REMOTE_USER}@${REMOTE_HOST}" \
-  "sudo cat ${REMOTE_FULL_PATH}" > "$LOCAL_TMP" 2>> "$LOG_FILE"; then
+log "Descargando → ${LOCAL_FINAL}"
+
+if ssh -i "$SSH_KEY" \
+     -p "$SSH_PORT" \
+     -o BatchMode=yes \
+     -o StrictHostKeyChecking=accept-new \
+     -o ConnectTimeout=10 \
+     -o ServerAliveInterval=30 \
+     -o ServerAliveCountMax=3 \
+     -o Compression=yes \
+     "${REMOTE_USER}@${REMOTE_HOST}" \
+     "sudo cat '${REMOTE_FULL_PATH}'" > "$LOCAL_TMP" 2>> "$LOG_FILE"; then
   
+  # Verificar que el archivo descargado no esté vacío
+  if [[ !  -s "$LOCAL_TMP" ]]; then
+    error "El archivo descargado está vacío"
+    rm -f "$LOCAL_TMP"
+    exit 1
+  fi
+  
+  # Mover atómicamente
   mv -f "$LOCAL_TMP" "$LOCAL_FINAL"
   
-  FILE_SIZE=$(du -h "$LOCAL_FINAL" | cut -f1)
+  # Información del archivo descargado
+  FILE_SIZE=$(du -h "$LOCAL_FINAL" | awk '{print $1}')
   
-  echo "[$(date -Is)] ✓ OK: Descargado ${REMOTE_FILE} (${FILE_SIZE})" >> "$LOG_FILE"
+  # Validar que es un archivo gzip válido (opcional)
+  if command -v gzip &> /dev/null; then
+    if gzip -t "$LOCAL_FINAL" 2>> "$LOG_FILE"; then
+      log "✓ Archivo gzip válido"
+    else
+      error "El archivo descargado no es un gzip válido"
+      exit 1
+    fi
+  fi
+  
+  log "✓ Descarga exitosa:  ${REMOTE_FILE}"
+  log "  Tamaño local: ${FILE_SIZE}"
 else
-  echo "[$(date -Is)] ✗ ERROR: Fallo en la descarga de ${REMOTE_FILE}" >> "$LOG_FILE"
+  error "Falló la descarga de ${REMOTE_FILE}"
   rm -f "$LOCAL_TMP"
   exit 1
 fi
 
 # ============================================================
-# 3) Opcional: Limpiar backups antiguos
+# 4) Limpieza de backups antiguos (retención)
 # ============================================================
 if [[ -n "${RETENTION_DAYS:-}" ]] && [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
-  echo "[$(date -Is)] Limpiando backups con más de ${RETENTION_DAYS} días..." >> "$LOG_FILE"
-  find "$LOCAL_DIR" -maxdepth 1 -type f -name "*.sql.gz" -mtime "+${RETENTION_DAYS}" -delete
-  echo "[$(date -Is)] Limpieza completada" >> "$LOG_FILE"
+  log "Aplicando política de retención:  ${RETENTION_DAYS} días"
+  
+  # Buscar archivos antiguos
+  OLD_FILES=$(find "$LOCAL_DIR" -maxdepth 1 -type f -name "*.sql.gz" \
+              -mtime "+${RETENTION_DAYS}" -print)
+  
+  if [[ -n "$OLD_FILES" ]]; then
+    DELETED=0
+    while IFS= read -r file; do
+      log "  Eliminando:  $(basename "$file")"
+      rm -f "$file"
+      ((DELETED++))
+    done <<< "$OLD_FILES"
+    
+    log "✓ Eliminados ${DELETED} backup(s) antiguo(s)"
+  else
+    log "  No hay backups para eliminar"
+  fi
 fi
 
-echo "[$(date -Is)] ====== Proceso finalizado correctamente ======" >> "$LOG_FILE"
+# ============================================================
+# Finalización
+# ============================================================
+log "====== Sincronización completada exitosamente ======"
+exit 0
