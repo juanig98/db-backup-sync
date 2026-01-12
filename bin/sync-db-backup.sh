@@ -3,7 +3,7 @@
 # sync-db-backup.sh
 # Sincroniza backup de base de datos desde servidor remoto
 #
-# Uso: sync-db-backup.sh -env /ruta/al/archivo. conf
+# Uso: sync-db-backup.sh -env /ruta/al/archivo.conf
 #
 set -euo pipefail
 
@@ -11,7 +11,7 @@ set -euo pipefail
 # Constantes
 # ============================================================
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 # ============================================================
 # Funciones auxiliares
@@ -20,7 +20,7 @@ usage() {
   cat <<EOF
 Uso: $SCRIPT_NAME -env <archivo_configuracion>
 
-Sincroniza backups de base de datos desde un servidor remoto. 
+Sincroniza backups de base de datos desde un servidor remoto.
 
 Opciones:
   -env FILE     Archivo de configuración (requerido)
@@ -65,7 +65,7 @@ done
 
 # Validar que se pasó el archivo de configuración
 if [[ -z "$CONFIG_FILE" ]]; then
-  echo "ERROR:  Debes especificar un archivo de configuración con -env" >&2
+  echo "ERROR: Debes especificar un archivo de configuración con -env" >&2
   echo "Ejemplo: $SCRIPT_NAME -env /opt/db-backup-sync/etc/db-prod.conf" >&2
   exit 1
 fi
@@ -119,8 +119,23 @@ TMP_DIR="${LOCAL_DIR}/.tmp"
 mkdir -p "$LOCAL_DIR" "$TMP_DIR"
 touch "$LOG_FILE"
 
-# Construir nombre del archivo
-TODAY_DATE=$(date +%Y%m%d)
+# Construir nombre del archivo con offset de fecha
+# DATE_OFFSET: días a sumar (+1) o restar (-1) de la fecha actual
+# Útil cuando hay diferencia de zona horaria entre servidores
+DATE_OFFSET="${DATE_OFFSET:-0}"
+
+if [[ !  "$DATE_OFFSET" =~ ^-?[0-9]+$ ]]; then
+  error "DATE_OFFSET debe ser un número entero (ej: -1, 0, 1): '${DATE_OFFSET}'"
+  exit 1
+fi
+
+# Calcular fecha con offset
+if [[ "$DATE_OFFSET" -eq 0 ]]; then
+  TODAY_DATE=$(date +%Y%m%d)
+else
+  TODAY_DATE=$(date -d "${DATE_OFFSET} days" +%Y%m%d)
+fi
+
 REMOTE_FILE="${TODAY_DATE}${BACKUP_TIME}.${DB_NAME}.sql.gz"
 REMOTE_FULL_PATH="${REMOTE_DIR}/${REMOTE_FILE}"
 
@@ -131,6 +146,7 @@ log "====== Inicio de sincronización ======"
 log "Versión: $SCRIPT_VERSION"
 log "Configuración: $CONFIG_FILE"
 log "Servidor remoto: ${REMOTE_USER}@${REMOTE_HOST}:${SSH_PORT}"
+log "Fecha calculada: ${TODAY_DATE} (offset: ${DATE_OFFSET} días)"
 log "Archivo remoto: ${REMOTE_FULL_PATH}"
 
 # ============================================================
@@ -145,7 +161,7 @@ if !  ssh -i "$SSH_KEY" \
      -o ConnectTimeout=10 \
      "${REMOTE_USER}@${REMOTE_HOST}" \
      "sudo test -f '${REMOTE_FULL_PATH}'" 2>> "$LOG_FILE"; then
-  error "El archivo no existe en el servidor remoto:  ${REMOTE_FULL_PATH}"
+  error "El archivo no existe en el servidor remoto: ${REMOTE_FULL_PATH}"
   exit 1
 fi
 
@@ -171,7 +187,7 @@ LOCAL_FINAL="${LOCAL_DIR}/${REMOTE_FILE}"
 
 # Verificar si ya existe localmente
 if [[ -f "$LOCAL_FINAL" ]]; then
-  log "⚠️  El archivo ya existe localmente:  $LOCAL_FINAL"
+  log "⚠️ El archivo ya existe localmente: $LOCAL_FINAL"
   log "Saltando descarga..."
   log "====== Sincronización completada (archivo ya existente) ======"
   exit 0
